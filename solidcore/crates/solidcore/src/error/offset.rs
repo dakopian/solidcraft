@@ -1732,7 +1732,13 @@ mod tests {
                 false,
                 false,
             ),
-            (O::CrossingUndecided, ErrorKind::Unsupported, false, false, true),
+            (
+                O::CrossingUndecided,
+                ErrorKind::Unsupported,
+                false,
+                false,
+                true,
+            ),
             (
                 O::CurveKindUnsupported {
                     edge: None,
@@ -1744,7 +1750,13 @@ mod tests {
                 true,
             ),
             // a failure reviewed as the kernel's fault, with its reason
-            (O::Defect { why: "x" }, ErrorKind::StageFailed, false, true, true),
+            (
+                O::Defect { why: "x" },
+                ErrorKind::StageFailed,
+                false,
+                true,
+                true,
+            ),
             (
                 O::DistanceUnresolved {
                     distance: 1e-9,
@@ -1790,8 +1802,20 @@ mod tests {
                 false,
                 true,
             ),
-            (O::EdgeuseNotGiven, ErrorKind::InvalidInput, false, false, true),
-            (O::ExactCurveUncut, ErrorKind::Unsupported, false, false, false),
+            (
+                O::EdgeuseNotGiven,
+                ErrorKind::InvalidInput,
+                false,
+                false,
+                true,
+            ),
+            (
+                O::ExactCurveUncut,
+                ErrorKind::Unsupported,
+                false,
+                false,
+                false,
+            ),
             (
                 O::ExtendedEdgeUntrimmed,
                 ErrorKind::Unsupported,
@@ -1811,7 +1835,13 @@ mod tests {
                 false,
             ),
             // its class is its cause's
-            (O::FaceDomainUnresolved, ErrorKind::Failed, false, false, true),
+            (
+                O::FaceDomainUnresolved,
+                ErrorKind::Failed,
+                false,
+                false,
+                true,
+            ),
             (
                 O::FaceHasNoOuterFaceuse { face },
                 ErrorKind::InvalidInput,
@@ -1836,7 +1866,13 @@ mod tests {
                 false,
                 true,
             ),
-            (O::FacesApart { face }, ErrorKind::Unsupported, false, false, false),
+            (
+                O::FacesApart { face },
+                ErrorKind::Unsupported,
+                false,
+                false,
+                false,
+            ),
             (
                 O::FacesMoveRefused {
                     refusal: OffsetFacesRefusal::NoRoom,
@@ -1867,9 +1903,27 @@ mod tests {
             ),
             // a consistency check of the kernel's own data that did not hold: its fault
             (O::Inconsistent("x"), ErrorKind::Failed, true, true, true),
-            (O::InvalidValue("x"), ErrorKind::InvalidInput, true, false, true),
-            (O::LaminaEdgeOtherSide, ErrorKind::Unsupported, false, false, true),
-            (O::LocalFaceNotListed, ErrorKind::InvalidInput, false, false, true),
+            (
+                O::InvalidValue("x"),
+                ErrorKind::InvalidInput,
+                true,
+                false,
+                true,
+            ),
+            (
+                O::LaminaEdgeOtherSide,
+                ErrorKind::Unsupported,
+                false,
+                false,
+                true,
+            ),
+            (
+                O::LocalFaceNotListed,
+                ErrorKind::InvalidInput,
+                false,
+                false,
+                true,
+            ),
             (
                 O::LoopGapEndsAmbiguous {
                     face: None,
@@ -1976,7 +2030,13 @@ mod tests {
                 false,
                 false,
             ),
-            (O::SeamOpened { face }, ErrorKind::Unsupported, false, false, false),
+            (
+                O::SeamOpened { face },
+                ErrorKind::Unsupported,
+                false,
+                false,
+                false,
+            ),
             (
                 O::ShellTangentCurveUncertified,
                 ErrorKind::Unsupported,
@@ -2020,7 +2080,13 @@ mod tests {
                 false,
                 false,
             ),
-            (O::TangentEndOffCurve, ErrorKind::Unsupported, false, false, false),
+            (
+                O::TangentEndOffCurve,
+                ErrorKind::Unsupported,
+                false,
+                false,
+                false,
+            ),
             (
                 O::TangentGapsAtConcaveEdge,
                 ErrorKind::Unsupported,
@@ -2051,7 +2117,13 @@ mod tests {
                 false,
                 false,
             ),
-            (O::VertexArcInPlane, ErrorKind::Unsupported, false, false, true),
+            (
+                O::VertexArcInPlane,
+                ErrorKind::Unsupported,
+                false,
+                false,
+                true,
+            ),
             (
                 O::VertexArcMissesPlane {
                     distance: 30.0,
@@ -2063,9 +2135,27 @@ mod tests {
                 true,
             ),
             // its cause decides
-            (O::VertexArcsNotOneSphere, ErrorKind::Failed, false, false, true),
-            (O::VertexCurveNotArc, ErrorKind::Unsupported, false, false, true),
-            (O::VertexNotGiven, ErrorKind::InvalidInput, false, false, true),
+            (
+                O::VertexArcsNotOneSphere,
+                ErrorKind::Failed,
+                false,
+                false,
+                true,
+            ),
+            (
+                O::VertexCurveNotArc,
+                ErrorKind::Unsupported,
+                false,
+                false,
+                true,
+            ),
+            (
+                O::VertexNotGiven,
+                ErrorKind::InvalidInput,
+                false,
+                false,
+                true,
+            ),
             (
                 O::WallsMeetAcross {
                     face,
