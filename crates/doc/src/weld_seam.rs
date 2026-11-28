@@ -127,6 +127,10 @@ pub struct SeamWeld {
     /// The seam's width: the band's, or each spot's diameter.
     pub width: f64,
     pub look: SeamLook,
+    /// How far the marks' edge zone may reach from the path: the site's room to the faces' edges
+    /// ([`SeamSite::room`]), so it is drawn on the faces; left no wider than the band, it is not
+    /// drawn. `f64::INFINITY` draws it whole (`1.05` times half the width).
+    pub room: f64,
 }
 
 /// Something about a seam the user should know, though it builds.
@@ -169,9 +173,15 @@ pub fn seam_weld(seam: &SeamWeld) -> Result<Seam> {
     let laid = lay(seam.start, &seam.path, n, tol)?;
     let w = seam.width;
     let h = thickness * w;
-    let radii = [MARKS.core, MARKS.band, MARKS.edge].map(|f| f * w / 2.0);
+    let mut radii = [MARKS.core, MARKS.band, MARKS.edge].map(|f| f * w / 2.0);
+    if seam.room.is_nan() || seam.room <= 0.0 {
+        return bad("a seam room that is not positive");
+    }
+    // the edge zone held to the room, never under the band (the weld's own size)
+    radii[2] = radii[2].min(seam.room).max(radii[1]);
+    let edge_drawn = radii[2] - radii[1] >= tol;
     let t_u: f64 = seam.thicknesses.iter().skip(1).sum();
-    let reach = laid.iter().flat_map(Laid::points).flatten().fold(0.0_f64, |m, c| m.max(c.abs())) + radii[2] + t_u + first + h;
+    let reach = laid.iter().map(Laid::reach).fold(0.0_f64, f64::max) + radii[2] + t_u + first + h;
     if !reach.is_finite() || reach > profiles::MAX_COORD {
         return bad("a seam so large that it passes the model's size limit");
     }
@@ -194,19 +204,21 @@ pub fn seam_weld(seam: &SeamWeld) -> Result<Seam> {
         let lift = scale(n, level);
         let up = scale(n, sense);
         let mut solids = Vec::new();
-        for r in radii {
+        for &r in radii.iter().take(if edge_drawn { 3 } else { 2 }) {
             let bodies =
                 loops(r, lift)?.iter().map(|outline| profiles::extrude_curves(outline, up, h, true)).collect::<std::result::Result<Vec<_>, _>>()?;
             solids.push(solidcraft_kernel::union_all(&bodies.iter().collect::<Vec<_>>())?);
         }
-        let [core, band, edge] = <[Body; 3]>::try_from(solids).map_err(|_| SeamRefusal::Invalid("a seam zone not built"))?;
+        let mut solids = solids.into_iter();
+        let (Some(core), Some(band)) = (solids.next(), solids.next()) else {
+            return bad("a seam zone not built");
+        };
         let band_only = less(&band, &core)?;
-        let edge_only = less(&edge, &band)?;
-        pieces.extend([(core, SpotZone::Core), (band_only, SpotZone::Band), (edge_only, SpotZone::Edge)].map(|(body, zone)| SpotPiece {
-            body,
-            zone,
-            side,
-        }));
+        pieces.push(SpotPiece { body: core, zone: SpotZone::Core, side });
+        pieces.push(SpotPiece { body: band_only, zone: SpotZone::Band, side });
+        if let Some(edge) = solids.next() {
+            pieces.push(SpotPiece { body: less(&edge, &band)?, zone: SpotZone::Edge, side });
+        }
     }
     Ok(Seam { pieces, notices })
 }
@@ -227,6 +239,10 @@ pub struct SeamSite {
     pub normal: [f64; 3],
     /// The sheets in stack order along `normal`, the picked one first.
     pub sheets: Vec<SpotSheet>,
+    /// How far the path lies from the nearest edge of every face it crosses: at least half the
+    /// width. Give it to [`SeamWeld::room`] so the edge zone is drawn on the faces. Infinite when
+    /// no face has an edge.
+    pub room: f64,
 }
 
 /// The site of a seam of `width` drawn from `start` along `path` on record face `face` of sheet
@@ -240,11 +256,18 @@ pub struct SeamSite {
 ///
 /// # Errors
 /// [`SeamRefusal::Invalid`] for an empty path or a path point that is not finite, and the
-/// refusals of [`seam_weld`] for the path itself; [`SeamRefusal::AtJoint`] with the spot's
-/// refusal at a joint; [`SeamRefusal::JointOnOtherFaces`], [`SeamRefusal::PastFaceEdge`] and
-/// [`SeamRefusal::EdgeNotMeasured`] where the stack does not take the seam. The errors of the
-/// kernel calls otherwise.
+/// refusals of [`seam_weld`] for the path itself, [`SeamRefusal::ArcTighterThanSeam`] included;
+/// [`SeamRefusal::AtJoint`] with the spot's refusal at a joint; [`SeamRefusal::JointOnOtherFaces`],
+/// [`SeamRefusal::PastFaceEdge`] and [`SeamRefusal::EdgeNotMeasured`] where the stack does not
+/// take the seam. The errors of the kernel calls otherwise.
 pub fn seam_site(sheets: &[&Body], picked: usize, face: usize, start: [f64; 3], path: &[SeamPiece], width: f64) -> Result<SeamSite> {
+    site(sheets, picked, face, start, path, width, MARKS.edge * width / 2.0)
+}
+
+/// [`seam_site`] for a weld along the path whose widest part reaches `widest` from it: every arc
+/// of the path must turn wider than that, by more than the zone tolerance, so the site never
+/// takes an arc the weld's build refuses.
+pub(crate) fn site(sheets: &[&Body], picked: usize, face: usize, start: [f64; 3], path: &[SeamPiece], width: f64, widest: f64) -> Result<SeamSite> {
     if path.is_empty() {
         return bad("a seam with no path");
     }
@@ -265,6 +288,14 @@ pub fn seam_site(sheets: &[&Body], picked: usize, face: usize, start: [f64; 3], 
     let tol = profiles::zone_tolerance()?;
     let n = first.normal;
     let laid = lay(start, path, n, tol)?;
+    // an arc the build refuses: tighter than the weld's widest part
+    for (i, piece) in laid.iter().enumerate() {
+        if let Laid::Arc { radius, .. } = *piece
+            && radius - widest <= tol
+        {
+            return Err(SeamRefusal::ArcTighterThanSeam { piece: i, fits: radius * width / widest });
+        }
+    }
 
     // every face crossed, at its level along the line from the picked face
     let mut level = 0.0;
@@ -299,7 +330,13 @@ pub fn seam_site(sheets: &[&Body], picked: usize, face: usize, start: [f64; 3], 
 
     // the path moved from the picked face to the faying face
     let shift = sub(first.at, start);
-    Ok(SeamSite { start: first.at, path: path.iter().map(|p| p.moved(shift)).collect(), normal: n, sheets: first.sheets })
+    Ok(SeamSite {
+        start: first.at,
+        path: path.iter().map(|p| p.moved(shift)).collect(),
+        normal: n,
+        sheets: first.sheets,
+        room: tightest.map_or(f64::INFINITY, |(room, ..)| room),
+    })
 }
 
 impl SeamPiece {
@@ -396,11 +433,14 @@ impl Laid {
         }
     }
 
-    /// Every point the piece is drawn from: its ends, and an arc's centre.
-    fn points(&self) -> Vec<[f64; 3]> {
+    /// How far the piece reaches from the origin along any axis, at most: a line's largest end
+    /// coordinate; an arc's largest centre coordinate plus its radius, which bounds an arc that
+    /// bulges past its ends.
+    pub(crate) fn reach(&self) -> f64 {
+        let largest = |p: [f64; 3]| p.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
         match *self {
-            Self::Line { a, b, .. } => vec![a, b],
-            Self::Arc { a, b, c, .. } => vec![a, b, c],
+            Self::Line { a, b, .. } => largest(a).max(largest(b)),
+            Self::Arc { c, radius, .. } => largest(c) + radius,
         }
     }
 
@@ -444,7 +484,7 @@ impl Laid {
     /// A one-face planar sheet with the piece, moved by `lift`, as one of its edges, and that
     /// edge's record index: a line closed by a triangle standing off it along `n`, an arc by the
     /// two lines to its centre.
-    fn helper(&self, lift: [f64; 3], n: [f64; 3], size: f64, tol: f64) -> Result<(Body, usize)> {
+    pub(crate) fn helper(&self, lift: [f64; 3], n: [f64; 3], size: f64, tol: f64) -> Result<(Body, usize)> {
         let (a, b) = self.ends();
         let (a, b) = (add(a, lift), add(b, lift));
         let curves = match *self {

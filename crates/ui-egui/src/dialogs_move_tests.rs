@@ -866,6 +866,34 @@ fn translated_box() -> crate::scenario::Harness {
     h
 }
 
+#[test]
+fn select_other_returns_crossings_in_the_move_previews_frame() {
+    let mut h = translated_box();
+    let mut d = h.app.dialog.take().unwrap();
+    switch_type(&h.app, &mut d, ROTATE);
+    d.inputs[1].items = vec![Sel::Axis { name: "Y".into() }];
+    let Kind::Move { angle, .. } = &mut d.kind else { panic!("expected Move") };
+    *angle = "90 deg".into();
+    h.app.dialog = Some(d);
+    h.call("ui.view", json!({"view":"top"}));
+    h.settle();
+
+    // The original X end faces at 0 and 20 now lie at Z = -10 and -30.
+    let proj = crate::viewport::projection(&h.app, h.app.viewport.rect.unwrap());
+    let pos = proj.to_screen(Vec3::new(5.0, 15.0, -10.0)).unwrap();
+    let faces: Vec<_> = crate::viewport::pick_through(&h.app, &proj, pos)
+        .into_iter()
+        .filter_map(|hit| match hit {
+            crate::viewport::Hit::Face { body, point, .. } if body == "Body1" => Some(point),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(faces.len(), 2, "{faces:?}");
+    for (point, z) in faces.into_iter().zip([-10.0, -30.0]) {
+        assert!((point - Vec3::new(5.0, 15.0, z)).len() < 1e-4, "{point:?}");
+    }
+}
+
 /// #8746: changing the Move Type keeps the move made so far, and the new type moves the body
 /// on from there; one solid.move holds the chain.
 #[test]
@@ -3118,4 +3146,48 @@ mod keep_axes {
         assert!(p.get("carry").is_none(), "{p}");
         assert_eq!(p["leave"], json!([rim]), "{p}");
     }
+}
+
+/// #22900: Point to Point with several To points makes a copy at each, moved from From to it,
+/// and the original stays where it was. Create Copy ticks itself.
+#[test]
+fn point_to_point_copies_to_each_to_point() {
+    let mut h = crate::scenario::Harness::new();
+    h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+    h.app.start("solid.move");
+    {
+        let d = h.app.dialog.as_mut().unwrap();
+        d.kind = kind(POINT_TO_POINT, &h.app.session.doc);
+        d.inputs = inputs(POINT_TO_POINT);
+        d.inputs[0].items = vec![Sel::Body { name: "Body1".into() }];
+        let at = |x: f64, y: f64| Sel::Vertex { body: String::new(), point: Vec3::new(x, y, 0.0) };
+        d.inputs[1].items = vec![at(0.0, 0.0)];
+        // Two places on one face, as two clicks on the ground plate pick them.
+        let on_face = |x: f64, y: f64| Sel::Face { body: "Body1".into(), index: 0, point: Vec3::new(x, y, 0.0) };
+        d.inputs[2].toggle(vec![on_face(30.0, 0.0)]);
+        d.inputs[2].toggle(vec![on_face(0.0, 40.0)]);
+        assert_eq!(d.inputs[2].items.len(), 2, "a second click on the same face adds a To point");
+    }
+    let d = h.app.dialog.clone().unwrap();
+    assert!(several_destinations(&d));
+    let cmds = commands(&h.app, &d).unwrap();
+    let moves: Vec<_> = cmds.iter().filter(|(id, _)| id == "solid.move").map(|(_, p)| (p["translate"].clone(), p["copy"].clone())).collect();
+    assert_eq!(
+        moves,
+        vec![(json!([mm(30.0), mm(0.0), mm(0.0)]), json!(true)), (json!([mm(0.0), mm(40.0), mm(0.0)]), json!(true))],
+        "one copy per To point"
+    );
+    crate::dialogs::confirm(&mut h.app);
+    h.settle();
+    assert!(h.app.dialog.is_none(), "OK ran");
+    let st = h.app.session.model.state();
+    let mut mins: Vec<(i64, i64)> = st.bodies.iter().map(|b| b.mesh().bounds().min).map(|m| (m.x.round() as i64, m.y.round() as i64)).collect();
+    mins.sort();
+    assert_eq!(mins, vec![(0, 0), (0, 40), (30, 0)], "the original stays and a copy stands at each To point");
+
+    // One To point is still a plain move unless Create Copy is ticked.
+    let mut one = d.clone();
+    one.inputs[2].items.truncate(1);
+    one.extra.remove("copy");
+    assert!(!several_destinations(&one));
 }

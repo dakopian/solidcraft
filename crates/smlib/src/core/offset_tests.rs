@@ -24,12 +24,33 @@ use crate::{BooleanOp, Error};
 /// A case longer than this is a hang.
 const TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Stress corpus S0790 (#18802): the rim hole leaves a 0.00002 mm web at the
-/// frustum's top. Inward shelling preserves that web. Moving the drill to x = 8.8
-/// makes its rim touch the top boundary at (10, 0, 50), which keeps the diagnosed
-/// outline-touch refusal and its nested kernel cause (#18568).
 #[test]
-fn shell_of_a_drilled_frustum_keeps_its_failure_reason() {
+fn transform_face_maps_a_reordered_pick_and_preserves_its_original_tag() {
+    let body = super::history::tag(&make_box([0.; 3], [10.; 3]).unwrap(), 0).unwrap();
+    let pick = |b: &Body, point| solidcore_ops::pick::faces(b, &[point], 1e-6).unwrap().unwrap()[0];
+    let top = [5., 5., 10.];
+    let floor = [5., 5., 0.];
+    let (top_tag, floor_tag) = (pick(&body, top), pick(&body, floor));
+    {
+        let mut b = body.kernel();
+        let reversed = b.face_list().iter().rev().copied().collect();
+        b.set_face_list(reversed).unwrap();
+    }
+    let selected = pick(&body, top);
+    assert_ne!(selected, top_tag, "a pick in the new order must not be used as a history tag");
+    let (raised, changed) = super::offset::transform_face(&body, selected, [0., 0., 2.], top, [0., 0., 1.], 0.).unwrap();
+    assert!(changed);
+    let history = super::history::read(&raised).unwrap();
+    assert_eq!(history.faces[pick(&raised, [5., 5., 12.])].origins, [(0, top_tag)]);
+    assert_eq!(history.faces[pick(&raised, floor)].origins, [(0, floor_tag)]);
+}
+
+/// Stress corpus S0790 (#18802): the rim hole leaves a 0.00002 mm web at the
+/// frustum's top. Inward shelling preserves that web. Moved to x = 8.8, the drill's
+/// rim touches the top boundary at (10, 0, 50), and the shell builds the same hollow
+/// (#22791; refused as an outline touching itself before, #18568).
+#[test]
+fn shell_of_a_drilled_frustum_builds_with_or_without_its_web() {
     let shelled = |x| {
         timed("S0790", move || {
             let cone = super::make_cone([0.0; 3], 25.0, 10.0, 50.0).unwrap();
@@ -68,13 +89,16 @@ fn shell_of_a_drilled_frustum_keeps_its_failure_reason() {
     let got = volume(&body, 1e-8).unwrap();
     assert!(rel(got, want) < 1e-9, "volume {got}, independently derived {want}");
 
-    let error = shelled(8.8).expect_err("the hole actually touches the top outline");
-    let words = error.to_string();
-    let Error::OutlineTouches { at, .. } = &error else { panic!("{words}") };
-    assert!((at[0] - 10.0).abs() < 1e-4 && at[1].abs() < 1e-4 && (at[2] - 50.0).abs() < 1e-4, "at {at:?}");
-    assert!(!words.contains("upstream status"), "{words}");
-    assert!(words.contains("an offset edge could not be split where a loop gap or a step corner needs it"), "{words}");
-    eprintln!("{words}");
+    // 8.8 from the axis the eccentric hole touches the top's rim (r 10) at (10, 0, 50), so the
+    // top's outline touches itself there (#22791). It shells to the same sections with the
+    // hole's centre at 8.8: 9243.77979518797.
+    let body = shelled(8.8).expect("the hole touching the top's outline shells");
+    let check = super::check(&body, crate::check::CheckLevel::All).unwrap();
+    assert!(check.is_valid(), "{check}");
+    assert_eq!(super::solid_count(&body).unwrap(), 1);
+    let want = 9243.77979518797;
+    let got = volume(&body, 1e-8).unwrap();
+    assert!(rel(got, want) < 1e-9, "volume {got}, independently derived {want}");
 }
 
 #[test]
@@ -94,6 +118,18 @@ fn typed_offset_refusals_keep_their_nested_kernel_cause() {
 fn offset_folds_keep_the_largest_wall() {
     let refusal = solidcore_ops::Error::WallFolds { largest: Some(1.0) };
     assert_eq!(refused(refusal, "offset::face: a folded wall".into()), Error::WallFolds { largest: Some(1.0) });
+}
+
+/// #22792: what the kernel cannot handle keeps its words, as a draft's refusal does. A shell of a
+/// threaded boss or a split sphere read "not supported yet: SMLib shell for this geometry", which
+/// hid the construction that refused (the offset's seam reconstruction, not the room test).
+#[test]
+fn unsupported_offset_refusals_keep_their_reason() {
+    let why = "periodic rim needs exactly two boundary ends";
+    let refusal = solidcore_ops::Error::Unsupported(why);
+    let error = refused(refusal.clone(), format!("offset::offset_executive::periodic_boundary: {why}"));
+    assert_eq!(error, Error::Refused(refusal));
+    assert!(error.to_string().contains(why), "{error}");
 }
 
 /// How near a pick point must be.
@@ -353,14 +389,22 @@ fn case(name: &str) -> Case {
         // its top radius would be 10 + 20 tan(atan(-0.1) - 0.5) = -3.68, so it closes on the way up.
         "draft_a_cone_until_it_closes" => c(
             Op::Draft(Shape::Frustum([0.0; 3], 10.0, 8.0, 20.0), vec![[0.0, 9.0, 10.0]], [0.0; 3], Z, Z, 0.5),
-            Expect::Fails(draft_refused("a drafted cone would close within the face")),
+            Expect::Fails(Error::Refused(solidcore_ops::Error::OffsetRefused { face: None, why: solidcore_ops::OffsetRefusal::DraftConeCloses })),
+        ),
+        // #22807: Ø20 x 100 cylinder drafted 6° about its base closes at z = 10 / tan(6°) ~ 95.14 < 100.
+        "draft_a_cylinder_until_it_closes" => c(
+            Op::Draft(Shape::Cylinder([0.0; 3], 10.0, 100.0), vec![[10.0, 0.0, 50.0]], [0.0; 3], Z, Z, 6f64.to_radians()),
+            Expect::Fails(Error::Refused(solidcore_ops::Error::OffsetRefused { face: None, why: solidcore_ops::OffsetRefusal::DraftConeCloses })),
         ),
         // The same cone about the plane z = 150, past its apex at z = 100: its radius there,
         // 10 - 0.1 * 150 = -5, is not positive. The face itself does not close: the refusal names
         // the neutral plane.
         "draft_a_cone_about_a_plane_past_its_apex" => c(
             Op::Draft(Shape::Frustum([0.0; 3], 10.0, 8.0, 20.0), vec![[0.0, 9.0, 10.0]], [0.0, 0.0, 150.0], Z, Z, 0.1),
-            Expect::Fails(draft_refused("the neutral plane is at or past a drafted cone's apex")),
+            Expect::Fails(Error::Refused(solidcore_ops::Error::OffsetRefused {
+                face: None,
+                why: solidcore_ops::OffsetRefusal::DraftNeutralPlanePastApex,
+            })),
         ),
         _ => panic!("{name}"),
     }
@@ -520,6 +564,7 @@ cases!(
     draft_a_cylinder_about_a_plane_through_its_axis,
     draft_a_cylinder_about_a_plane_along_its_axis,
     draft_a_cone_until_it_closes,
+    draft_a_cylinder_until_it_closes,
     draft_a_cone_about_a_plane_past_its_apex,
 );
 
